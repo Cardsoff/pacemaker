@@ -66,11 +66,24 @@ def register():
         db.session.commit()
         db.session.refresh(user)
 
-        # Создаём дефолтные данные для нового юзера: цель + setups
-        import database as legacy_db
+        # Создаём дефолтные данные для нового юзера через прямой SQL (надёжнее)
         try:
-            legacy_db.ensure_default_goal_for_user(new_user_id)
-            legacy_db.ensure_default_setups_for_user(new_user_id)
+            import database as legacy_db
+            from datetime import datetime as _dt
+            with legacy_db.get_conn() as _conn:
+                # Default goal
+                _conn.execute(
+                    "INSERT INTO goals (name, amount, monthly_return_pct, monthly_deposit, created_at, is_active, user_id) "
+                    "VALUES (?, ?, ?, ?, ?, 1, ?)",
+                    ("Первая цель", 10000, 10, 0, _dt.utcnow().strftime("%Y-%m-%d"), new_user_id)
+                )
+                # Default setups
+                for s in ['breakout', 'trend', 'scalp', 'swing', 'news']:
+                    _conn.execute(
+                        "INSERT OR IGNORE INTO setups (user_id, name) VALUES (?, ?)",
+                        (new_user_id, s)
+                    )
+            print(f"[register] Defaults created for user {new_user_id}", flush=True)
         except Exception as _e:
             import traceback, sys
             print(f"[register] Ошибка при создании дефолтов для user {new_user_id}: {_e}", file=sys.stderr)
