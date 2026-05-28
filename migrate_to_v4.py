@@ -1,5 +1,5 @@
 """
-Pacemaker v4.0 — Миграция с v3.2 (single-user) на v4.0 (multi-tenant).
+TradeRunner v4.0 — Миграция с v3.2 (single-user) на v4.0 (multi-tenant).
 
 Что делает:
 1. Создаёт таблицу users
@@ -169,7 +169,7 @@ if __name__ == "__main__":
     email = sys.argv[1]
     name = sys.argv[2] if len(sys.argv) > 2 else "Артём"
 
-    print(f"\n🔑 Придумай пароль для входа в Pacemaker (минимум 8 символов).")
+    print(f"\n🔑 Придумай пароль для входа в TradeRunner (минимум 8 символов).")
     print(f"   Из пароля выводится ключ шифрования API-ключей биржи.")
     print(f"   ⚠️  Запомни/сохрани в менеджер паролей — забудешь = API-ключи биржи придётся вводить заново!\n")
 

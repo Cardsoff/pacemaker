@@ -1,5 +1,5 @@
 """
-SQLite-хранилище для Pacemaker v4.0 (multi-tenant).
+SQLite-хранилище для TradeRunner v4.0 (multi-tenant).
 
 Все функции автоматически фильтруют по user_id через Flask `g` объект.
 Если вызывается вне Flask контекста — функции принимают user_id явно.

@@ -1,5 +1,5 @@
 """
-Pacemaker v4.0 — SQLAlchemy модели.
+TradeRunner v4.0 — SQLAlchemy модели.
 
 Multi-tenant: каждая таблица имеет user_id, физическая изоляция данных.
 Совместимо с SQLite (локально) и PostgreSQL (продакшн).
@@ -17,7 +17,7 @@ db = SQLAlchemy()
 
 
 class User(db.Model, UserMixin):
-    """Пользователь Pacemaker. Email + пароль = логин."""
+    """Пользователь TradeRunner. Email + пароль = логин."""
     __tablename__ = "users"
 
     id            = Column(Integer, primary_key=True)

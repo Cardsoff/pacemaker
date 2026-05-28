@@ -2506,9 +2506,9 @@ import hashlib
 
 if __name__ == "__main__":
     db.init_db()
-    app.logger.info("=== Pacemaker v4.0 started ===")
+    app.logger.info("=== TradeRunner v4.0 started ===")
     print("=" * 60)
-    print("  Pacemaker v4.0 — Multi-tenant")
+    print("  TradeRunner v4.0 — Multi-tenant")
     print("  Open: http://localhost:5000/login")
     print("  Logs:", str(LOGS_DIR / "app.log"))
     print("=" * 60)

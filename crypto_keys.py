@@ -1,5 +1,5 @@
 """
-Pacemaker — Zero-knowledge шифрование API-ключей биржи.
+TradeRunner — Zero-knowledge шифрование API-ключей биржи.
 
 Архитектура:
 1. При регистрации генерируется случайный kdf_salt (16 байт), сохраняется в users.kdf_salt
