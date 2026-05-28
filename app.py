@@ -34,7 +34,7 @@ APP_DIR = Path(__file__).parent
 CONFIG_PATH = APP_DIR / "config.ini"
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
-# === ProxyFix: нужен на Railway/Render/Heroku — прокси передаёт реальный Host/Scheme через X-Forwarded-* ===
+# === ProxyFix для Railway/Render/Heroku (X-Forwarded-* headers) ===
 from werkzeug.middleware.proxy_fix import ProxyFix
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
 
@@ -96,18 +96,17 @@ def _set_g_user():
 from auth import auth_bp
 app.register_blueprint(auth_bp)
 
-# Auto-create tables on startup (for fresh deploys with empty DB)
+# Auto-create tables on startup
 with app.app_context():
     try:
         orm_db.create_all()
-        # Также инициализируем legacy таблицы через database.init_db (для multi-tenant migration)
         try:
             db.init_db()
         except Exception as _e:
             app.logger.warning(f"db.init_db skipped: {_e}")
-        app.logger.info("✅ SQLAlchemy tables auto-created on startup")
+        app.logger.info("✅ Tables auto-created on startup")
     except Exception as _e:
-        app.logger.error(f"❌ orm_db.create_all failed: {_e}")
+        app.logger.error(f"❌ create_all failed: {_e}")
 
 
 # === ФАЗА 2: LOGGING с rotation (2026-05-26) ===
@@ -156,10 +155,9 @@ def _csrf_check():
         return
     origin = request.headers.get("Origin") or ""
     referer = request.headers.get("Referer") or ""
-    # 1) Origin в whitelist (localhost для dev)
     if origin in ALLOWED_ORIGINS:
         return
-    # 2) Same-origin: динамически — работает на любом домене (Railway, Render, свой)
+    # Same-origin (для любого домена: Railway/Render/свой)
     try:
         host_url = request.host_url.rstrip("/")
         if origin == host_url:
@@ -168,17 +166,13 @@ def _csrf_check():
             return
     except Exception:
         pass
-    # 3) Referer начинается с whitelist
     if any(referer.startswith(o + "/") for o in ALLOWED_ORIGINS) or any(referer == o for o in ALLOWED_ORIGINS):
         return
-    # 4) С localhost (для curl-тестов и same-origin без Origin)
     remote = (request.remote_addr or "").strip()
     if remote in ("127.0.0.1", "::1", "localhost"):
         return
-    app.logger.warning(
-        "CSRF blocked %s %s (origin=%r, referer=%r, host=%r, ip=%s)",
-        request.method, request.path, origin, referer, request.host_url, remote
-    )
+    app.logger.warning("CSRF blocked %s %s (origin=%r, referer=%r, host=%r, ip=%s)",
+        request.method, request.path, origin, referer, request.host_url, remote)
     return jsonify({"ok": False, "error": "CSRF check failed"}), 403
 
 
@@ -883,6 +877,11 @@ def api_goal():
         db.update_active_goal(request.get_json(force=True) or {})
     elif request.method == "DELETE":
         db.delete_active_goal_and_create_empty()
+    # Lazy-init: дефолтная цель если у юзера нет
+    try:
+        db.ensure_default_goal_for_user(current_user.id)
+    except Exception as _e:
+        app.logger.warning(f"ensure_default_goal failed: {_e}")
     return jsonify(db.get_active_goal())
 
 
@@ -913,6 +912,11 @@ def api_setups():
         if len(name) > 20:
             return jsonify({"ok": False, "error": "too long"}), 400
         db.add_setup(name)
+    # Lazy-init: дефолтные setups
+    try:
+        db.ensure_default_setups_for_user(current_user.id)
+    except Exception as _e:
+        app.logger.warning(f"ensure_default_setups failed: {_e}")
     return jsonify(db.list_setups())
 
 
@@ -1018,6 +1022,12 @@ _DASHBOARD_CACHE = {"data": None, "ts": 0, "key": None}
 @app.route("/api/dashboard")
 @_login_required
 def api_dashboard():
+    # Lazy-init: дефолтные цель + setups при первом обращении
+    try:
+        db.ensure_default_goal_for_user(current_user.id)
+        db.ensure_default_setups_for_user(current_user.id)
+    except Exception as _e:
+        app.logger.warning(f"lazy-init failed: {_e}")
     # #32 Кэш на 10 сек по полному query-string
     import time as _t
     now = _t.time()
