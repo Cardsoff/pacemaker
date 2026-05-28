@@ -33,6 +33,11 @@ from bitunix_client import BitunixClient, BitunixError
 APP_DIR = Path(__file__).parent
 CONFIG_PATH = APP_DIR / "config.ini"
 app = Flask(__name__, static_folder="static", template_folder="templates")
+
+# === ProxyFix: нужен на Railway/Render/Heroku — прокси передаёт реальный Host/Scheme через X-Forwarded-* ===
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
+
 # Авто-перезагрузка templates и static без рестарта сервера
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.jinja_env.auto_reload = True
