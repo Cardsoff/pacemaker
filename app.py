@@ -96,6 +96,19 @@ def _set_g_user():
 from auth import auth_bp
 app.register_blueprint(auth_bp)
 
+# Auto-create tables on startup (for fresh deploys with empty DB)
+with app.app_context():
+    try:
+        orm_db.create_all()
+        # Также инициализируем legacy таблицы через database.init_db (для multi-tenant migration)
+        try:
+            db.init_db()
+        except Exception as _e:
+            app.logger.warning(f"db.init_db skipped: {_e}")
+        app.logger.info("✅ SQLAlchemy tables auto-created on startup")
+    except Exception as _e:
+        app.logger.error(f"❌ orm_db.create_all failed: {_e}")
+
 
 # === ФАЗА 2: LOGGING с rotation (2026-05-26) ===
 import logging
