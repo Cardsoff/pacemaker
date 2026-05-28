@@ -1255,7 +1255,21 @@ def api_credentials():
         db.log_audit("update", "credentials", exchange)
         app.logger.info("API creds saved for user %s exchange %s key=%s",
                         current_user.id, exchange, _mask_secret(api_key))
-        return jsonify({"ok": True})
+
+        # AUTO-SYNC: сразу после сохранения ключей подтянуть всю историю с биржи
+        auto_sync_result = None
+        try:
+            # Full sync с начала времён (2020-01-01)
+            from datetime import datetime as _dt
+            start_ms = int(_dt(2020, 1, 1).timestamp() * 1000)
+            end_ms = int(_dt.utcnow().timestamp() * 1000)
+            auto_sync_result = _run_sync(start_ms, end_ms, limit=200, label="auto-after-credentials")
+            auto_sync_result["mode"] = "full"
+        except Exception as _e:
+            app.logger.warning(f"Auto-sync after credentials failed: {_e}")
+            auto_sync_result = {"ok": False, "error": str(_e)}
+
+        return jsonify({"ok": True, "auto_sync": auto_sync_result})
 
     # GET: вернуть текущие ключи (per-user)
     settings = db.get_settings()
