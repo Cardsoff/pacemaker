@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>{% block title %}Pacemaker{% endblock %}</title>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --card: #11161f;
+    --border: #1f2837;
+    --text: #e5edf5;
+    --muted: #8a96a8;
+    --accent: #3aa97a;
+    --accent-h: #4cc28d;
+    --error: #e05a5a;
+    --success: #4cc28d;
+    --info: #5a9be0;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .brand {
+    font-size: 32px;
+    font-weight: 700;
+    color: var(--accent);
+    margin-bottom: 8px;
+    letter-spacing: -0.5px;
+  }
+  .brand-tagline {
+    color: var(--muted);
+    font-size: 14px;
+    margin-bottom: 32px;
+    text-align: center;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 32px;
+    width: 100%;
+    max-width: 400px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin-bottom: 24px;
+  }
+  .form-group { margin-bottom: 16px; }
+  label {
+    display: block;
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+  input[type="text"], input[type="email"], input[type="password"] {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+  }
+  input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 16px 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  button.btn-primary {
+    width: 100%;
+    padding: 12px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button.btn-primary:hover { background: var(--accent-h); }
+  .form-footer {
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .form-footer a {
+    color: var(--accent);
+    text-decoration: none;
+    font-weight: 500;
+  }
+  .form-footer a:hover { text-decoration: underline; }
+  .flash-list {
+    margin-bottom: 16px;
+    list-style: none;
+  }
+  .flash {
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin-bottom: 8px;
+  }
+  .flash-error { background: rgba(224,90,90,0.15); border: 1px solid var(--error); color: #ffcaca; }
+  .flash-success { background: rgba(76,194,141,0.15); border: 1px solid var(--success); color: #b8f0d3; }
+  .flash-info { background: rgba(90,155,224,0.15); border: 1px solid var(--info); color: #c8dbf5; }
+  .hint {
+    font-size: 12px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  .security-badge {
+    margin-top: 24px;
+    padding: 12px 14px;
+    background: rgba(58,169,122,0.08);
+    border: 1px solid rgba(58,169,122,0.2);
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+  .security-badge strong { color: var(--accent); }
+</style>
+</head>
+<body>
+  <div class="brand">Pacemaker</div>
+  <div class="brand-tagline">Журнал и аналитика твоих крипто-сделок</div>
+
+  <div class="card">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <ul class="flash-list">
+          {% for category, msg in messages %}
+            <li class="flash flash-{{ category }}">{{ msg }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </div>
+
+  {% block footer_extra %}{% endblock %}
+</body>
+</html>
