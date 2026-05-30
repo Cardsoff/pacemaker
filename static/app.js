@@ -1297,17 +1297,21 @@ function _maskSecret(s) {
   if (s.length <= 8) return '•'.repeat(s.length);
   return '••••••••' + s.slice(-4);
 }
-// мы сохраняем последние снэпы тут, чтобы при сохранении пустого поля не стереть существующий ключ
-let _credsCache = { api_key: '', api_secret: '' };
+// sec-fix 2026-05-30: backend больше НЕ отдаёт plaintext, только api_key_mask/api_connected.
+// При сохранении пустых полей — ключи НЕ меняются (это серверная семантика — backend различает clear=true vs. partial-update).
+// Если юзер хочет сменить только ключ — он вводит новый ключ. Если хочет очистить — кнопка "Очистить".
+let _credsConnected = false;
 $('#apiStatus').addEventListener('click', async () => {
   const r = await api.get('/api/credentials');
-  _credsCache = { api_key: r.api_key || '', api_secret: r.api_secret || '' };
+  _credsConnected = !!r.api_connected;
   $('#credExchange').value = r.exchange || 'bitunix';
   // ВАЖНО: НЕ показываем ключ в открытом виде, только маску снизу
   $('#credApiKey').value = '';
   $('#credApiSecret').value = '';
-  const mk = $('#credApiKeyMask'); if (mk) mk.textContent = 'Сохранён ключ: ' + _maskSecret(r.api_key);
-  const ms = $('#credApiSecretMask'); if (ms) ms.textContent = 'Сохранён секрет: ' + _maskSecret(r.api_secret);
+  const km = r.api_key_mask || '— не задан —';
+  const sm = r.api_secret_mask || '— не задан —';
+  const mk = $('#credApiKeyMask'); if (mk) mk.textContent = 'Сохранён ключ: ' + km;
+  const ms = $('#credApiSecretMask'); if (ms) ms.textContent = 'Сохранён секрет: ' + sm;
   $('#credentialsModal').classList.add('open');
 });
 $('#apiStatus').style.cursor = 'pointer';
@@ -1316,19 +1320,33 @@ $('#apiStatus').title = 'Нажми чтобы настроить API биржи
 $('#saveCredsBtn').addEventListener('click', async () => {
   const newKey = $('#credApiKey').value.trim();
   const newSec = $('#credApiSecret').value.trim();
+  // Если оба поля пустые — ничего не отправляем, ключи не меняются
+  if (!newKey && !newSec) {
+    if (_credsConnected) {
+      toast('Поля пустые — ключи не изменены', 'info');
+    } else {
+      toast('Введи api_key и api_secret чтобы подключить биржу', 'error');
+    }
+    $('#credentialsModal').classList.remove('open');
+    return;
+  }
+  // Если один пустой — это ошибка, нельзя сохранить «полу-обновление»
+  if (!newKey || !newSec) {
+    toast('Нужны оба поля: api_key и api_secret', 'error');
+    return;
+  }
   const r = await api.post('/api/credentials', {
     exchange: $('#credExchange').value,
-    // пусто = не менять (берём текущий из кэша)
-    api_key: newKey || _credsCache.api_key,
-    api_secret: newSec || _credsCache.api_secret,
+    api_key: newKey,
+    api_secret: newSec,
   });
   $('#credentialsModal').classList.remove('open');
   await loadAll();
-  toast(r.api_connected ? '✓ API подключён' : 'Ключи сохранены', 'success');
+  toast('✓ Ключи сохранены' + (r.auto_sync && r.auto_sync.ok ? `, синхронизация: +${r.auto_sync.added||0} сделок` : ''), 'success');
 });
 $('#clearCredsBtn').addEventListener('click', async () => {
-  if (!confirm('Очистить API-ключи?')) return;
-  await api.post('/api/credentials', { exchange: 'bitunix', api_key: '', api_secret: '' });
+  if (!confirm('Очистить API-ключи? После этого нужно будет ввести их заново для синхронизации.')) return;
+  await api.post('/api/credentials', { exchange: 'bitunix', clear: true });
   $('#credentialsModal').classList.remove('open');
   await loadAll();
   toast('Ключи очищены', 'info');
