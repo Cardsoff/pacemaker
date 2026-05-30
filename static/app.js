@@ -1297,23 +1297,19 @@ function _maskSecret(s) {
   if (s.length <= 8) return '•'.repeat(s.length);
   return '••••••••' + s.slice(-4);
 }
-// sec-fix 2026-05-30: backend больше НЕ отдаёт plaintext, только api_key_mask/api_connected.
-// При сохранении пустых полей — ключи НЕ меняются (это серверная семантика — backend различает clear=true vs. partial-update).
-// Если юзер хочет сменить только ключ — он вводит новый ключ. Если хочет очистить — кнопка "Очистить".
+// sec-fix 2026-05-30: backend больше НЕ отдаёт plaintext, только api_key_mask/api_connected/ek_available
 let _credsConnected = false;
 $('#apiStatus').addEventListener('click', async () => {
   const r = await api.get('/api/credentials');
   _credsConnected = !!r.api_connected;
-  // sec-fix 2026-05-30: если encryption_key пропал (Remember-me cookie без re-login)
-  // — сразу предупреждаем юзера ДО того как он попытается сохранить
+  // Если encryption_key пропал (Remember-me cookie без re-login) — сразу предупреждаем
   if (r.ek_available === false) {
-    if (confirm('⚠ Чтобы подключить или изменить ключи биржи, нужно войти заново с паролем (zero-knowledge защита: без пароля сервер не может зашифровать твои ключи).\n\nПерейти на /login?')) {
+    if (confirm('Чтобы подключить или изменить ключи биржи, нужно войти заново с паролем (zero-knowledge защита). Перейти на /login?')) {
       window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname);
     }
     return;
   }
   $('#credExchange').value = r.exchange || 'bitunix';
-  // ВАЖНО: НЕ показываем ключ в открытом виде, только маску снизу
   $('#credApiKey').value = '';
   $('#credApiSecret').value = '';
   const km = r.api_key_mask || '— не задан —';
@@ -1328,7 +1324,6 @@ $('#apiStatus').title = 'Нажми чтобы настроить API биржи
 $('#saveCredsBtn').addEventListener('click', async () => {
   const newKey = $('#credApiKey').value.trim();
   const newSec = $('#credApiSecret').value.trim();
-  // Если оба поля пустые — ничего не отправляем, ключи не меняются
   if (!newKey && !newSec) {
     if (_credsConnected) {
       toast('Поля пустые — ключи не изменены', 'info');
@@ -1338,12 +1333,10 @@ $('#saveCredsBtn').addEventListener('click', async () => {
     $('#credentialsModal').classList.remove('open');
     return;
   }
-  // Если один пустой — это ошибка, нельзя сохранить «полу-обновление»
   if (!newKey || !newSec) {
     toast('Нужны оба поля: api_key и api_secret', 'error');
     return;
   }
-  // sec-fix 2026-05-30: проверяем response.ok чтобы не показывать "сохранено" при ошибке
   let r;
   try {
     const resp = await fetch('/api/credentials', {
@@ -1358,14 +1351,13 @@ $('#saveCredsBtn').addEventListener('click', async () => {
     });
     r = await resp.json();
     if (resp.status === 401) {
-      // Сессия есть (Flask-Login), но encryption_key пропал — нужен реальный пароль
       $('#credentialsModal').classList.remove('open');
-      toast('⚠ Сессия истекла. Войди заново с паролем чтобы сохранить ключи (zero-knowledge защита).', 'error');
+      toast('Сессия истекла. Войди заново с паролем чтобы сохранить ключи.', 'error');
       setTimeout(() => { window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname); }, 2500);
       return;
     }
     if (!resp.ok || !r.ok) {
-      toast('Ошибка сохранения: ' + (r.error || `HTTP ${resp.status}`), 'error');
+      toast('Ошибка сохранения: ' + (r.error || 'HTTP ' + resp.status), 'error');
       return;
     }
   } catch (e) {
@@ -1374,7 +1366,7 @@ $('#saveCredsBtn').addEventListener('click', async () => {
   }
   $('#credentialsModal').classList.remove('open');
   await loadAll();
-  toast('✓ Ключи сохранены' + (r.auto_sync && r.auto_sync.ok ? `, синхронизация: +${r.auto_sync.added||0} сделок` : ''), 'success');
+  toast('Ключи сохранены' + (r.auto_sync && r.auto_sync.ok ? ', синхронизация: +' + (r.auto_sync.added||0) + ' сделок' : ''), 'success');
 });
 $('#clearCredsBtn').addEventListener('click', async () => {
   if (!confirm('Очистить API-ключи? После этого нужно будет ввести их заново для синхронизации.')) return;
@@ -3035,4 +3027,55 @@ function fireConfetti() {
     const inp = document.createElement('input');
     inp.type = 'text';
     inp.className = 'trade-note-input';
-    inp.value = oldTe
+    inp.value = oldText;
+    td.innerHTML = '';
+    td.appendChild(inp);
+    inp.focus();
+    inp.select();
+    const save = async () => {
+      const newText = inp.value;
+      if (newText === oldText) {
+        td.textContent = oldText;
+        return;
+      }
+      try {
+        await fetch('/api/trades/' + tradeId, {
+          method: 'PATCH',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ note: newText }),
+        });
+        td.textContent = newText;
+        toast('✓ Заметка обновлена', 'success', 1500);
+      } catch (err) {
+        td.textContent = oldText;
+        toast('✗ Не удалось обновить', 'error');
+      }
+    };
+    inp.addEventListener('blur', save);
+    inp.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') inp.blur();
+      if (ev.key === 'Escape') { td.textContent = oldText; }
+    });
+  });
+})();
+
+// === #27: Напоминание ротировать ключи (>90 дней) ===
+(function rotateKeysReminder() {
+  async function check() {
+    try {
+      const c = await fetch('/api/credentials').then(r => r.json());
+      if (c.rotate_recommended) {
+        const pill = document.getElementById('apiStatus');
+        if (pill && !pill.querySelector('.rotate-warning')) {
+          const warn = document.createElement('span');
+          warn.className = 'rotate-warning';
+          warn.textContent = '⏰ старше ' + c.age_days + ' дн';
+          warn.title = 'Рекомендуется перевыпустить API-ключи на бирже (старше 90 дней)';
+          pill.appendChild(warn);
+        }
+      }
+    } catch (e) {}
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', check);
+  else check();
+})();
