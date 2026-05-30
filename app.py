@@ -228,6 +228,13 @@ app.logger.setLevel(logging.INFO)
 logging.getLogger().addHandler(_log_handler)
 logging.getLogger().setLevel(logging.INFO)
 
+# Также пишем в stdout — чтобы видеть в Railway logs (sec-fix 2026-05-30 #2)
+_stdout_handler = logging.StreamHandler(__import__('sys').stdout)
+_stdout_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+_stdout_handler.setLevel(logging.INFO)
+app.logger.addHandler(_stdout_handler)
+logging.getLogger().addHandler(_stdout_handler)
+
 
 def _mask_secret(s: str, prefix: int = 4, suffix: int = 4) -> str:
     """Маскирует секрет для логов: 'abcdef...xyz' → 'abcd...wxyz'."""
@@ -2653,6 +2660,45 @@ def _check_pin(provided: str) -> bool:
 
 
 import hashlib
+
+
+
+# === DEBUG endpoint (sec-fix 2026-05-30 #2) ===
+# Защищён секретным token'ом из env DEBUG_TOKEN.
+# Использование: /__debug?t=YOUR_DEBUG_TOKEN
+@app.route("/__debug")
+def __debug_status():
+    import os as _os
+    expected = _os.environ.get("DEBUG_TOKEN", "").strip()
+    provided = (request.args.get("t") or "").strip()
+    if not expected or not provided or provided != expected:
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        users_count = orm_db.session.query(User).count()
+        # Достаём только email и id, без чувствительных полей
+        users_list = [
+            {"id": u.id, "email": u.email, "verified": getattr(u, "email_verified", None),
+             "is_admin": u.is_admin, "is_blocked": getattr(u, "is_blocked", None),
+             "created_at": u.created_at.isoformat() if u.created_at else None}
+            for u in User.query.limit(50).all()
+        ]
+    except Exception as e:
+        users_count = -1
+        users_list = [{"error": str(e)}]
+    return jsonify({
+        "IS_PROD": IS_PROD,
+        "RESEND_API_KEY_set": bool(_envos.environ.get("RESEND_API_KEY", "").strip()),
+        "RESEND_API_KEY_len": len(_envos.environ.get("RESEND_API_KEY", "").strip()),
+        "RESEND_API_KEY_prefix": _envos.environ.get("RESEND_API_KEY", "")[:5],
+        "PACEMAKER_DB": _envos.environ.get("PACEMAKER_DB", ""),
+        "DATABASE_URL_set": bool(_envos.environ.get("DATABASE_URL", "")),
+        "FLASK_SECRET_KEY_set": bool(_envos.environ.get("FLASK_SECRET_KEY", "").strip()),
+        "RAILWAY_ENVIRONMENT": _envos.environ.get("RAILWAY_ENVIRONMENT", ""),
+        "MISE_PYTHON_GITHUB_ATTESTATIONS": _envos.environ.get("MISE_PYTHON_GITHUB_ATTESTATIONS", ""),
+        "users_count": users_count,
+        "users_sample": users_list,
+        "sqlalchemy_uri_prefix": app.config.get("SQLALCHEMY_DATABASE_URI", "")[:30] + "...",
+    })
 
 
 if __name__ == "__main__":
