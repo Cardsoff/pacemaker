@@ -60,13 +60,54 @@ if not _sk:
         pass
 app.secret_key = _sk or 'dev-fallback-key'
 
-# === SECURITY: Secure cookies ===
+# === SECURITY: Secure cookies + PROD флаг (sec-fix 2026-05-30) ===
+IS_PROD = bool(
+    _envos.environ.get('RAILWAY_ENVIRONMENT') or
+    _envos.environ.get('RENDER') or
+    _envos.environ.get('PRODUCTION') or
+    _envos.environ.get('DYNO')
+)
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = True if _envos.environ.get('FLASK_SECRET_KEY') else False  # True на проде (есть env), False локально
+app.config['SESSION_COOKIE_SECURE'] = IS_PROD
 app.config['REMEMBER_COOKIE_HTTPONLY'] = True
 app.config['REMEMBER_COOKIE_SAMESITE'] = 'Lax'
-app.config['REMEMBER_COOKIE_SECURE'] = True if _envos.environ.get('FLASK_SECRET_KEY') else False
+app.config['REMEMBER_COOKIE_SECURE'] = IS_PROD
+app.config['PREFERRED_URL_SCHEME'] = 'https' if IS_PROD else 'http'
+
+@app.after_request
+def _security_headers(response):
+    if IS_PROD:
+        response.headers.setdefault('Strict-Transport-Security', 'max-age=15552000; includeSubDomains')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+    response.headers.setdefault('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), interest-cohort=()')
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "font-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self';"
+    )
+    response.headers.setdefault('Content-Security-Policy', csp)
+    return response
+
+@app.errorhandler(Exception)
+def _global_error_handler(e):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    app.logger.exception("Unhandled exception: %s", e)
+    if request.path.startswith('/api/'):
+        return jsonify({"ok": False, "error": "Внутренняя ошибка сервера. Мы уже знаем."}), 500
+    return ("<h1>500 — Внутренняя ошибка</h1>"
+            "<p>Что-то пошло не так. Мы получили уведомление и разбираемся.</p>"
+            "<p><a href='/'>← На главную</a></p>"), 500
 
 # === Rate-limit на /login (защита от brute-force) ===
 from collections import defaultdict
@@ -88,7 +129,7 @@ def _login_rate_limit():
 # === PACEMAKER v4.0: SQLAlchemy + Flask-Login + DATABASE_URL ===
 from flask import g, session, redirect, url_for
 from flask_login import LoginManager, current_user, login_required as _login_required
-from models import db as orm_db, User
+from models import db as orm_db, User, ShareLink
 
 import os as _os
 _db_url = _os.environ.get('DATABASE_URL', f"sqlite:///{(APP_DIR / 'planner.db').as_posix()}")
@@ -121,6 +162,9 @@ def _set_g_user():
 from auth import auth_bp
 app.register_blueprint(auth_bp)
 
+from admin_views import admin_bp
+app.register_blueprint(admin_bp)
+
 # Auto-create tables on startup
 with app.app_context():
     try:
@@ -132,6 +176,35 @@ with app.app_context():
         app.logger.info("✅ Tables auto-created on startup")
     except Exception as _e:
         app.logger.error(f"❌ create_all failed: {_e}")
+
+# Auto-migration: добавить колонки если их нет (idempotent, SQLite + PostgreSQL).
+with app.app_context():
+    try:
+        from sqlalchemy import text as _sql_text
+
+        def _ensure_column(table, column, ddl_type, default_clause=""):
+            with orm_db.engine.connect() as conn:
+                dialect = conn.dialect.name
+                if dialect == "sqlite":
+                    rows = list(conn.execute(_sql_text(f"PRAGMA table_info({table})")))
+                    existing = {r[1] for r in rows}
+                else:
+                    rows = list(conn.execute(_sql_text(
+                        "SELECT column_name FROM information_schema.columns "
+                        f"WHERE table_name='{table}'"
+                    )))
+                    existing = {r[0] for r in rows}
+                if column not in existing:
+                    sql = f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type} {default_clause}".strip()
+                    conn.execute(_sql_text(sql))
+                    conn.commit()
+                    app.logger.info(f"  + migration: {table}.{column} added")
+
+        _ensure_column("users", "email_verified", "BOOLEAN", "NOT NULL DEFAULT 1")
+        _ensure_column("users", "email_verification_sent_at", "DATETIME", "")
+        _ensure_column("users", "is_blocked", "BOOLEAN", "NOT NULL DEFAULT 0")
+    except Exception as _e:
+        app.logger.error(f"❌ auto-migration failed: {_e}")
 
 
 # === ФАЗА 2: LOGGING с rotation (2026-05-26) ===
@@ -1257,22 +1330,43 @@ def api_reset():
     return jsonify({"ok": True, "backup": backup_name})
 
 
-@app.route("/api/credentials", methods=["GET", "POST"])
+@app.route("/api/credentials", methods=["GET", "POST", "DELETE"])
 @_login_required
 def api_credentials():
-    """v4.0: per-user encrypted API ключи через crypto_keys + user_settings."""
+    """
+    v4.0+ per-user encrypted API ключи.
+    sec-fix 2026-05-30: GET НЕ возвращает plaintext, только маску.
+    """
     from crypto_keys import encrypt_secret, decrypt_secret, session_get_fernet_key
     fk = session_get_fernet_key(session)
+
+    if request.method == "DELETE":
+        db.update_settings({"bitunix_api_key": "", "bitunix_api_secret": ""})
+        db.log_audit("delete", "credentials", "bitunix")
+        app.logger.info("API creds cleared for user %s", current_user.id)
+        return jsonify({"ok": True, "cleared": True})
 
     if request.method == "POST":
         if not fk:
             return jsonify({"ok": False, "error": "Залогинься заново"}), 401
         payload = request.get_json(force=True) or {}
         exchange = payload.get("exchange", "bitunix").lower()
-        api_key = payload.get("api_key", "")
-        api_secret = payload.get("api_secret", "")
+        api_key = (payload.get("api_key") or "").strip()
+        api_secret = (payload.get("api_secret") or "").strip()
+        clear_flag = bool(payload.get("clear"))
+
+        if not api_key and not api_secret and not clear_flag:
+            return jsonify({"ok": False, "error": "Введи api_key и api_secret или передай clear=true"}), 400
+
+        if clear_flag or (not api_key and not api_secret):
+            db.update_settings({f"{exchange}_api_key": "", f"{exchange}_api_secret": ""})
+            db.log_audit("delete", "credentials", exchange)
+            app.logger.info("API creds cleared for user %s exchange %s", current_user.id, exchange)
+            return jsonify({"ok": True, "cleared": True})
+
         if not (api_key and api_secret):
-            return jsonify({"ok": False, "error": "Введи api_key и api_secret"}), 400
+            return jsonify({"ok": False, "error": "Нужны оба: api_key И api_secret"}), 400
+
         db.update_settings({
             f"{exchange}_api_key": encrypt_secret(api_key, fk),
             f"{exchange}_api_secret": encrypt_secret(api_secret, fk),
@@ -1281,10 +1375,8 @@ def api_credentials():
         app.logger.info("API creds saved for user %s exchange %s key=%s",
                         current_user.id, exchange, _mask_secret(api_key))
 
-        # AUTO-SYNC: сразу после сохранения ключей подтянуть всю историю с биржи
         auto_sync_result = None
         try:
-            # Full sync с начала времён (2020-01-01)
             from datetime import datetime as _dt
             start_ms = int(_dt(2020, 1, 1).timestamp() * 1000)
             end_ms = int(_dt.utcnow().timestamp() * 1000)
@@ -1296,20 +1388,36 @@ def api_credentials():
 
         return jsonify({"ok": True, "auto_sync": auto_sync_result})
 
-    # GET: вернуть текущие ключи (per-user)
+    # GET: ТОЛЬКО маску, никогда plaintext
     settings = db.get_settings()
-    creds = {"exchange": "bitunix", "api_key": "", "api_secret": ""}
-    if fk:
-        enc_key = settings.get("bitunix_api_key", "")
-        enc_secret = settings.get("bitunix_api_secret", "")
-        if enc_key:
-            creds["api_key"] = decrypt_secret(enc_key, fk) or ""
-        if enc_secret:
-            creds["api_secret"] = decrypt_secret(enc_secret, fk) or ""
-    creds["api_connected"] = bool(creds["api_key"] and creds["api_secret"])
-    creds["age_days"] = None
-    creds["rotate_recommended"] = False
-    return jsonify(creds)
+    enc_key = settings.get("bitunix_api_key", "") or ""
+    enc_secret = settings.get("bitunix_api_secret", "") or ""
+
+    api_key_mask = ""
+    api_secret_mask = ""
+    api_connected = False
+
+    if fk and enc_key and enc_secret:
+        try:
+            plain_key = decrypt_secret(enc_key, fk) or ""
+            plain_secret = decrypt_secret(enc_secret, fk) or ""
+            if plain_key and plain_secret:
+                api_key_mask = _mask_secret(plain_key)
+                api_secret_mask = _mask_secret(plain_secret)
+                api_connected = True
+        except Exception:
+            api_connected = False
+
+    return jsonify({
+        "exchange": "bitunix",
+        "api_key_mask": api_key_mask,
+        "api_secret_mask": api_secret_mask,
+        "api_connected": api_connected,
+        "api_key": "***" if api_connected else "",
+        "api_secret": "***" if api_connected else "",
+        "age_days": None,
+        "rotate_recommended": False,
+    })
 
 
 # (старый код api_credentials удалён — заменён выше)
@@ -2230,31 +2338,54 @@ def api_equity_daily():
 
 
 # === #47 Sharing-режим (read-only ссылка с замаскированными суммами) ===
+# sec-fix 2026-05-30: токены теперь в БД (ShareLink) с user_id,
+# а раньше — in-memory dict без owner, что давало посетителю чужие данные.
 import secrets as _secrets
-
-_SHARE_TOKENS = {}  # token → {created_at, expires_at} (in-memory)
 
 
 @app.route("/api/share/create", methods=["POST"])
 @_login_required
 def api_share_create():
-    """Генерит токен для read-only ссылки. Действует 24 часа."""
+    """Генерит токен read-only ссылки текущего юзера. Действует 24 часа."""
+    from datetime import timedelta as _td
     token = _secrets.token_urlsafe(16)
-    now_ms = int(datetime.utcnow().timestamp() * 1000)
-    _SHARE_TOKENS[token] = {
-        "created_at": now_ms,
-        "expires_at": now_ms + 24 * 3600 * 1000,
-    }
-    # Чистим старые токены
-    _SHARE_TOKENS_KEYS = list(_SHARE_TOKENS.keys())
-    for k in _SHARE_TOKENS_KEYS:
-        if _SHARE_TOKENS[k]["expires_at"] < now_ms:
-            del _SHARE_TOKENS[k]
+    now_dt = datetime.utcnow()
+    link = ShareLink(
+        user_id=current_user.id,
+        token=token,
+        created_at=now_dt,
+        expires_at=now_dt + _td(hours=24),
+        mask_amounts=True,
+        revoked=False,
+    )
+    orm_db.session.add(link)
+    orm_db.session.commit()
+    try:
+        db.log_audit("create", "share_link", token[:8] + "...")
+    except Exception:
+        pass
     return jsonify({"token": token, "url": f"/share/{token}", "expires_in_hours": 24})
 
 
+@app.route("/api/share/revoke", methods=["POST"])
+@_login_required
+def api_share_revoke():
+    """Отзыв одной или всех share-ссылок текущего юзера."""
+    payload = request.get_json(silent=True) or {}
+    token = (payload.get("token") or "").strip()
+    q = ShareLink.query.filter_by(user_id=current_user.id)
+    if token:
+        q = q.filter_by(token=token)
+    affected = 0
+    for link in q.all():
+        if not link.revoked:
+            link.revoked = True
+            affected += 1
+    orm_db.session.commit()
+    return jsonify({"ok": True, "revoked": affected})
+
+
 def _mask_amount(v):
-    """Маскирует сумму: 12345.67 → 12k+"""
     try:
         v = float(v or 0)
     except Exception:
@@ -2270,21 +2401,49 @@ def _mask_amount(v):
 
 @app.route("/share/<token>")
 def share_view(token):
-    """Read-only view с замаскированными суммами."""
-    if token not in _SHARE_TOKENS:
-        return "Ссылка истекла или невалидна", 404
-    if _SHARE_TOKENS[token]["expires_at"] < int(datetime.utcnow().timestamp() * 1000):
+    """
+    Read-only view shared ссылки. user_id берётся из ShareLink модели.
+    Раньше использовался in-memory dict без owner — это была дыра.
+    """
+    link = ShareLink.query.filter_by(token=token).first()
+    if not link:
+        return "Ссылка не найдена", 404
+    if link.revoked:
+        return "Ссылка отозвана владельцем", 410
+    if link.expires_at < datetime.utcnow():
         return "Ссылка истекла", 410
-    # Базовые данные с маскировкой
-    goal = db.get_active_goal() or {}
-    trades = db.list_trades(limit=1000)
+
+    owner_id = link.user_id
+    try:
+        goal = db.get_active_goal(user_id=owner_id) or {}
+        trades = db.list_trades(limit=1000, user_id=owner_id)
+    except Exception as e:
+        app.logger.exception("share_view: ошибка для user_id=%s: %s", owner_id, e)
+        return "Не удалось загрузить данные", 500
+
     wins = sum(1 for t in trades if (t.get("pnl_usd") or 0) > 0)
     losses = sum(1 for t in trades if (t.get("pnl_usd") or 0) < 0)
     decisive = wins + losses
     winrate = (wins / decisive * 100) if decisive else 0
     net_pnl = sum(float(t.get("pnl_usd") or 0) - float(t.get("fee_usd") or 0) for t in trades)
-    # HTML
-    html = f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+    mask = link.mask_amounts
+    pnl_display = _mask_amount(net_pnl) if mask else f"{net_pnl:+.2f}"
+
+    html = SHARE_HTML_TEMPLATE.format(
+        goal_name=esc_html(goal.get('name', '—')),
+        n_trades=len(trades),
+        wins=wins,
+        losses=losses,
+        winrate=f"{winrate:.1f}",
+        pnl_class=('pos' if net_pnl >= 0 else 'neg'),
+        pnl_display=pnl_display,
+        mask_note=('суммы замаскированы для приватности · ' if mask else ''),
+        expires_at=link.expires_at.strftime('%Y-%m-%d %H:%M UTC'),
+    )
+    return Response(html, mimetype="text/html; charset=utf-8")
+
+
+SHARE_HTML_TEMPLATE = """<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>Trading Stats (shared)</title>
 <style>
 body {{ font-family: Arial, sans-serif; background: #0a0d14; color: #e6edf7; padding: 32px; max-width: 700px; margin: 0 auto; }}
@@ -2295,15 +2454,14 @@ h1 {{ color: #7c5cff; border-bottom: 2px solid #2d3548; padding-bottom: 8px; }}
 .pos {{ color: #10c98a; }} .neg {{ color: #ff5a6c; }}
 </style></head><body>
 <h1>📊 Trading Stats (shared)</h1>
-<div class="metric"><span>Цель</span><b>{esc_html(goal.get('name', '—'))}</b></div>
-<div class="metric"><span>Сделок</span><b>{len(trades)}</b></div>
+<div class="metric"><span>Цель</span><b>{goal_name}</b></div>
+<div class="metric"><span>Сделок</span><b>{n_trades}</b></div>
 <div class="metric"><span>Прибыльных</span><b class="pos">{wins}</b></div>
 <div class="metric"><span>Убыточных</span><b class="neg">{losses}</b></div>
-<div class="metric"><span>Winrate</span><b>{winrate:.1f}%</b></div>
-<div class="metric"><span>Net P&L</span><b class="{'pos' if net_pnl>=0 else 'neg'}">{_mask_amount(net_pnl)}</b></div>
-<div class="muted">Read-only · суммы замаскированы для приватности · ссылка истекает через 24 часа</div>
+<div class="metric"><span>Winrate</span><b>{winrate}%</b></div>
+<div class="metric"><span>Net P&amp;L</span><b class="{pnl_class}">{pnl_display}</b></div>
+<div class="muted">Read-only · {mask_note}ссылка истекает {expires_at}</div>
 </body></html>"""
-    return Response(html, mimetype="text/html; charset=utf-8")
 
 
 def esc_html(s):
@@ -2463,41 +2621,34 @@ def _invalidate_dashboard_cache_on_write(response):
 
 
 # === #24 2FA PIN для опасных действий (reset) ===
+# sec-fix 2026-05-30: PIN теперь per-user (был глобальный без user_id).
 @app.route("/api/security/pin", methods=["GET", "POST"])
 @_login_required
 def api_security_pin():
-    """Получить статус PIN или установить новый. POST: {pin: '1234'}."""
+    """Получить статус PIN или установить новый для текущего юзера. POST: {pin: '1234'}."""
     if request.method == "POST":
         payload = request.get_json(force=True) or {}
         pin = (payload.get("pin") or "").strip()
         if pin and not pin.isdigit():
             return jsonify({"ok": False, "error": "PIN должен быть цифры"}), 400
-        # сохраним в settings (хешируем для безопасности)
         if pin:
             ph = hashlib.sha256(pin.encode()).hexdigest()
-            with db.get_conn() as conn:
-                conn.execute(
-                    "INSERT INTO settings(key, value) VALUES ('security_pin', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (ph,))
+            db.update_settings({"security_pin": ph})
         else:
-            with db.get_conn() as conn:
-                conn.execute("DELETE FROM settings WHERE key='security_pin'")
+            db.update_settings({"security_pin": ""})
         return jsonify({"ok": True, "set": bool(pin)})
-    # GET — есть ли PIN
-    with db.get_conn() as conn:
-        r = conn.execute("SELECT value FROM settings WHERE key='security_pin'").fetchone()
-    return jsonify({"is_set": bool(r and r["value"])})
+    settings = db.get_settings()
+    return jsonify({"is_set": bool(settings.get("security_pin"))})
 
 
 def _check_pin(provided: str) -> bool:
-    """Проверка PIN. Если PIN не установлен — разрешено."""
+    """Проверка PIN текущего юзера. Если PIN не установлен — разрешено."""
     if not provided:
         provided = ""
-    with db.get_conn() as conn:
-        r = conn.execute("SELECT value FROM settings WHERE key='security_pin'").fetchone()
-    if not r or not r["value"]:
-        return True  # PIN не установлен
-    expected = r["value"]
+    settings = db.get_settings()
+    expected = settings.get("security_pin") or ""
+    if not expected:
+        return True
     return hashlib.sha256(provided.encode()).hexdigest() == expected
 
 

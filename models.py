@@ -1,5 +1,5 @@
 """
-TradeRunner v4.0 — SQLAlchemy модели.
+TradeRunner v4.0+ — SQLAlchemy модели.
 
 Multi-tenant: каждая таблица имеет user_id, физическая изоляция данных.
 Совместимо с SQLite (локально) и PostgreSQL (продакшн).
@@ -28,6 +28,10 @@ class User(db.Model, UserMixin):
     created_at    = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_login_at = Column(DateTime)
     is_admin      = Column(Boolean, default=False, nullable=False)
+    is_blocked    = Column(Boolean, default=False, nullable=False)  # для admin: блокировка
+    # Email verification (sec-fix 2026-05-30)
+    email_verified             = Column(Boolean, default=False, nullable=False)
+    email_verification_sent_at = Column(DateTime)  # для rate-limit повторной отправки
 
     # Связи
     trades       = relationship("Trade", backref="user", cascade="all, delete-orphan")
@@ -49,19 +53,18 @@ class UserSetting(db.Model):
     id      = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     key     = Column(String(100), nullable=False)
-    value   = Column(Text, nullable=False)  # для encrypted_* — base64 ciphertext
+    value   = Column(Text, nullable=False)
 
     __table_args__ = (UniqueConstraint("user_id", "key", name="uix_user_setting"),)
 
 
 class Trade(db.Model):
-    """Сделка пользователя."""
     __tablename__ = "trades"
 
     id          = Column(Integer, primary_key=True)
     user_id     = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    external_id = Column(String(100))  # ID с биржи (unique per user, не глобально)
-    ts          = Column(String(30), nullable=False, index=True)  # ISO datetime
+    external_id = Column(String(100))
+    ts          = Column(String(30), nullable=False, index=True)
     symbol      = Column(String(50), nullable=False, index=True)
     side        = Column(String(10), nullable=False, index=True)
     setup       = Column(String(100), index=True)
@@ -81,14 +84,13 @@ class Trade(db.Model):
 
 
 class Deposit(db.Model):
-    """Депозит / вывод пользователя."""
     __tablename__ = "deposits"
 
     id          = Column(Integer, primary_key=True)
     user_id     = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     external_id = Column(String(100))
     ts          = Column(String(30), nullable=False, index=True)
-    kind        = Column(String(20), nullable=False)  # deposit / withdrawal
+    kind        = Column(String(20), nullable=False)
     amount_usd  = Column(Float, nullable=False)
     note        = Column(Text, default="")
     source      = Column(String(30), nullable=False, default="manual")
@@ -99,7 +101,6 @@ class Deposit(db.Model):
 
 
 class EquitySnapshot(db.Model):
-    """Снимок equity для построения equity curve."""
     __tablename__ = "equity_snapshots"
 
     id         = Column(Integer, primary_key=True)
@@ -110,7 +111,6 @@ class EquitySnapshot(db.Model):
 
 
 class Goal(db.Model):
-    """Финансовая цель пользователя."""
     __tablename__ = "goals"
 
     id                 = Column(Integer, primary_key=True)
@@ -125,7 +125,6 @@ class Goal(db.Model):
 
 
 class Setup(db.Model):
-    """Торговый сетап пользователя (FVG, OB, breakout...)."""
     __tablename__ = "setups"
 
     id      = Column(Integer, primary_key=True)
@@ -136,7 +135,6 @@ class Setup(db.Model):
 
 
 class AuditLog(db.Model):
-    """Аудит-лог изменений (что юзер менял в settings/goals/trades)."""
     __tablename__ = "audit_log"
 
     id        = Column(Integer, primary_key=True)
@@ -149,16 +147,15 @@ class AuditLog(db.Model):
 
 
 class ShareLink(db.Model):
-    """Sharing-ссылки read-only с маскировкой сумм."""
     __tablename__ = "share_links"
 
-    id         = Column(Integer, primary_key=True)
-    user_id    = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    token      = Column(String(64), unique=True, nullable=False, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    expires_at = Column(DateTime, nullable=False)
+    id           = Column(Integer, primary_key=True)
+    user_id      = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    token        = Column(String(64), unique=True, nullable=False, index=True)
+    created_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at   = Column(DateTime, nullable=False)
     mask_amounts = Column(Boolean, default=True, nullable=False)
-    revoked    = Column(Boolean, default=False, nullable=False)
+    revoked      = Column(Boolean, default=False, nullable=False)
 
 
 # Индексы для производительности
