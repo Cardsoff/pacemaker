@@ -216,6 +216,34 @@ with app.app_context():
     except Exception as _e:
         app.logger.error(f"❌ auto-migration failed: {_e}")
 
+# Auto-backup БД при старте + чистка старых (sec-fix 2026-05-30 #4)
+# Сохраняем до 7 последних бэкапов в той же папке что и planner.db.
+def _auto_backup_db():
+    import shutil, glob
+    db_path = _os.environ.get('PACEMAKER_DB', '').strip()
+    if not db_path or not _os.path.exists(db_path):
+        app.logger.info("auto-backup: skip (no PACEMAKER_DB or file missing)")
+        return
+    try:
+        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        backup_path = f"{db_path}.backup-{ts}"
+        shutil.copy2(db_path, backup_path)
+        size_kb = _os.path.getsize(backup_path) // 1024
+        app.logger.info(f"auto-backup OK: {backup_path} ({size_kb} KB)")
+        # Чистим старые бэкапы — оставляем последние 7
+        backups = sorted(glob.glob(f"{db_path}.backup-*"))
+        for old in backups[:-7]:
+            try:
+                _os.unlink(old)
+                app.logger.info(f"auto-backup cleanup: removed {old}")
+            except Exception as _be:
+                app.logger.warning(f"auto-backup cleanup failed for {old}: {_be}")
+    except Exception as _e:
+        app.logger.error(f"auto-backup failed: {_e}")
+
+with app.app_context():
+    _auto_backup_db()
+
 
 # === ФАЗА 2: LOGGING с rotation (2026-05-26) ===
 import logging
@@ -2676,6 +2704,85 @@ import hashlib
 # === DEBUG endpoint (sec-fix 2026-05-30 #2) ===
 # Защищён секретным token'ом из env DEBUG_TOKEN.
 # Использование: /__debug?t=YOUR_DEBUG_TOKEN
+def _check_debug_token():
+    expected = _envos.environ.get("DEBUG_TOKEN", "").strip()
+    provided = (request.args.get("t") or "").strip()
+    return bool(expected) and provided == expected
+
+
+@app.route("/__debug/force-verify")
+def __debug_force_verify():
+    """Пометить юзера(ов) как email_verified=True. ?email=... или без — все."""
+    if not _check_debug_token():
+        return jsonify({"error": "forbidden"}), 403
+    email = (request.args.get("email") or "").strip().lower()
+    if email:
+        q = User.query.filter_by(email=email)
+    else:
+        q = User.query.filter_by(email_verified=False)
+    affected = q.update({User.email_verified: True})
+    orm_db.session.commit()
+    return jsonify({"ok": True, "verified_count": affected})
+
+
+@app.route("/__debug/promote-admin")
+def __debug_promote_admin():
+    """Сделать юзера админом. ?email=..."""
+    if not _check_debug_token():
+        return jsonify({"error": "forbidden"}), 403
+    email = (request.args.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "?email required"}), 400
+    u = User.query.filter_by(email=email).first()
+    if not u:
+        return jsonify({"error": "user not found"}), 404
+    u.is_admin = True
+    orm_db.session.commit()
+    return jsonify({"ok": True, "email": u.email, "is_admin": True})
+
+
+@app.route("/__debug/verify-link")
+def __debug_verify_link():
+    """Получить verification ссылку для юзера (обход email). ?email=..."""
+    if not _check_debug_token():
+        return jsonify({"error": "forbidden"}), 403
+    email = (request.args.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "?email required"}), 400
+    u = User.query.filter_by(email=email).first()
+    if not u:
+        return jsonify({"error": "user not found"}), 404
+    import token_service as _ts
+    secret = app.config["SECRET_KEY"]
+    token = _ts.generate_email_verify_token(secret, u.id)
+    return jsonify({
+        "verify_url": url_for("auth.verify_email", token=token, _external=True),
+        "expires_in_hours": 24,
+    })
+
+
+@app.route("/__debug/test-resend")
+def __debug_test_resend():
+    """Прямой тест Resend API. ?to=email@..."""
+    if not _check_debug_token():
+        return jsonify({"error": "forbidden"}), 403
+    to_email = (request.args.get("to") or "").strip()
+    if not to_email:
+        return jsonify({"error": "?to=email required"}), 400
+    import email_service as _es
+    try:
+        result = _es.send_email(
+            to_email,
+            "TradeRunner — Resend test",
+            "<h1>It works!</h1><p>This is a direct API test from /__debug/test-resend.</p>",
+            "It works! This is a direct API test."
+        )
+        return jsonify({"send_result": result, "is_configured": _es.is_configured()})
+    except Exception as e:
+        import traceback as _tb
+        return jsonify({"error": str(e), "traceback": _tb.format_exc()})
+
+
 @app.route("/__debug")
 def __debug_status():
     import os as _os
